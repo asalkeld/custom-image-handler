@@ -2,73 +2,37 @@ package main
 
 import (
 	"fmt"
-	"io"
-	"io/fs"
+	"io/ioutil"
 	"log"
 	"net/http"
-
-	"github.com/openshift/assisted-image-service/pkg/isoeditor"
+	"os"
+	"path"
 )
 
-const isoFile = "/home/angus/go/src/github.com/asalkeld/custom-image-handler/cached-rhcos-49.84.202107010027-0-openstack.x86_64.qcow2"
-
-// imageFileSystem is an http.FileSystem that creates a virtual filesystem of
-// host images. These *could* be later cached as real files.
-type imageFileSystem struct {
-	images []*imageFile
-}
-
-// imageFile is the http.File use in imageFileSystem.
-// It is used to wrap the Readdir method of http.File so that we can
-// only show images that we are aware of.
-type imageFile struct {
-	io.ReadSeekCloser
-	name              string
-	ignitionContent   []byte
-	rhcosStreamReader io.ReadSeeker
-}
-
-// Readdir is a wrapper around the Readdir method of the embedded File
-// that filters out all files that start with a period in their name.
-func (f imageFileSystem) Readdir(n int) ([]fs.FileInfo, error) {
-	result := []fs.FileInfo{}
-	for _, im := range f.images {
-		result = append(result, im)
-	}
-	fmt.Println("ReadDir", result)
-	return result, nil
-}
-
-func (f imageFileSystem) Open(name string) (http.File, error) {
-	fmt.Println("Open", name)
-	if name == "/" {
-		return nil, fs.ErrPermission
-	}
-	err := fs.ErrNotExist
-	for _, im := range f.images {
-		if "/"+im.name == name {
-			im.rhcosStreamReader, err = isoeditor.NewRHCOSStreamReader(isoFile, im.ignitionContent)
-			if err != nil {
-				fmt.Print(err)
-				return nil, err
-			}
-			return im, nil
-		}
-	}
-	return nil, err
-}
-
 func main() {
-	fsys := imageFileSystem{
-		images: []*imageFile{
-			{
-				name:            "host-image-3.qcow",
-				ignitionContent: []byte("someignitioncontent"),
-			},
-		},
+	data, err := ioutil.ReadFile("go.sum")
+	if err != nil {
+		panic(err)
 	}
-	fmt.Println("main", fsys.images[0])
+	cwd, err := os.Getwd()
+	if err != nil {
+		panic(err)
+	}
+	// https://releases-art-rhcos.svc.ci.openshift.org/art/storage/releases/rhcos-4.9/49.84.202107010027-0/x86_64/rhcos-49.84.202107010027-0-live.x86_64.iso
+	imageFS := NewImageFileSystem(path.Join(cwd, "rhcos-49.84.202107010027-0-live.x86_64.iso"))
 
-	http.Handle("/", http.FileServer(fsys))
+	for i := 0; i < 100; i++ {
+		imageFS.images = append(imageFS.images, &imageFile{
+			name:            fmt.Sprintf("host-image-%d.qcow", i),
+			ignitionContent: []byte(data),
+		})
+	}
+	fmt.Println("use below curl command, replacing '<num>' with 1-100")
+	fmt.Println("curl -X GET localhost:8080/host-image-<num>.qcow --output host-image-<num>.qcow")
+
+	// why use a FileServer?
+	// 1. it streams files efficiently
+	// 2. if we cache these images, then that will be an easy change.
+	http.Handle("/", http.FileServer(imageFS))
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
